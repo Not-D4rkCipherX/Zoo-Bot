@@ -1,4 +1,4 @@
-## BUMS BOT
+## ZOO BOT
 
 ## BOT FEATURE
 
