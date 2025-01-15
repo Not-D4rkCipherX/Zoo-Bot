@@ -8,7 +8,7 @@ const { DateTime } = require("luxon");
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const user_agents = require("./config/userAgents");
 const settings = require("./config/config");
-const { sleep, loadData, getRandomNumber } = require("./utils");
+const { sleep, loadData, getRandomNumber, findOptimalElement } = require("./utils");
 const { checkBaseUrl } = require("./checkAPI");
 const { Worker, isMainThread, parentPort, workerData } = require("worker_threads");
 
@@ -33,13 +33,13 @@ class ZooAPIClient {
     this.cachedData = null;
     this.proxyList = [];
     this.loadProxies();
+    this.session_name = null;
     this.session_user_agents = this.#load_session_data();
     this.baseURL = baseURL;
     this.queryId = queryId;
     this.accountIndex = accountIndex;
     this.proxy = proxy;
     this.proxyIP = null;
-    this.session_name = null;
   }
   #load_session_data() {
     try {
@@ -65,7 +65,7 @@ class ZooAPIClient {
       return this.session_user_agents[this.session_name];
     }
 
-    this.log(`Tạo user agent...`);
+    this.log(`Generating user agent...`);
     const newUserAgent = this.#get_random_user_agent();
     this.session_user_agents[this.session_name] = newUserAgent;
     this.#save_session_data(this.session_user_agents);
@@ -99,6 +99,7 @@ class ZooAPIClient {
     this.headers["sec-ch-ua-platform"] = platform;
     this.headers["User-Agent"] = this.#get_user_agent();
   }
+
   createUserAgent() {
     try {
       const telegramauth = this.queryId;
@@ -369,11 +370,152 @@ class ZooAPIClient {
       if (response.status === 200 && response.data.success) {
         return await this.claimQuest(hash, accountIndex, questKey, checkData);
       } else {
-        this.log(`Kiểm tra nhiệm vụ "${questKey}" thất bại: ${response.data.error}`, "warning");
+        this.log(`Quest check "${questKey}" failed: ${response.data.error}`, "warning");
         return { success: false, error: response.data.error };
       }
     } catch (error) {
-      this.log(`Lỗi khi kiểm tra nhiệm vụ "${questKey}": ${error.message}`, "error");
+      this.log(`Error checking quest"${questKey}": ${error.message}`, "error");
+      return { success: false, error: error.message };
+    }
+  }
+
+  async getAliance(hash, accountIndex) {
+    const url = `${this.baseURL}/alliance/rating`;
+    const currentTime = Math.floor(Date.now() / 1000);
+    const payload = {};
+    const apiHash = await this.createApiHash(currentTime, JSON.stringify(payload));
+
+    const headers = {
+      ...this.headers,
+      "api-hash": `${apiHash}`,
+      "Api-Key": `${hash}`,
+      "Api-Time": `${currentTime}`,
+    };
+
+    try {
+      const response = await axios.post(url, payload, { headers, ...this.getAxiosConfig(accountIndex) });
+      if (response.status === 200 && response.data.success) {
+        return response.data;
+      }
+    } catch (error) {
+      this.log(`Error when getting Alliance: ${error.message}`, "error");
+      return { success: false, error: error.message };
+    }
+  }
+
+  async joinAliance(hash, accountIndex, id) {
+    const url = `${this.baseURL}/alliance/join`;
+    const currentTime = Math.floor(Date.now() / 1000);
+    const payload = { data: id };
+    const apiHash = await this.createApiHash(currentTime, JSON.stringify(payload));
+
+    const headers = {
+      ...this.headers,
+      "api-hash": `${apiHash}`,
+      "Api-Key": `${hash}`,
+      "Api-Time": `${currentTime}`,
+    };
+
+    try {
+      const response = await axios.post(url, payload, { headers, ...this.getAxiosConfig(accountIndex) });
+      if (response.status === 200 && response.data.success) {
+        // const { alliance } = response.data;
+        this.log(`Join aliance success!`, "success");
+        return response.data;
+      }
+    } catch (error) {
+      this.log(`Error when joining Alliance: ${error.message}`, "error");
+      return { success: false, error: error.message };
+    }
+  }
+
+  async handleAliance(initData, accountIndex) {
+    this.log(`Checking aliance avaliable...`);
+    try {
+      const hash = initData.split("hash=")[1]?.split("&")[0];
+      if (!hash) {
+        return;
+      }
+
+      const userDataResult = await this.getUserData(initData, accountIndex);
+      if (!userDataResult.success) {
+        throw new Error(`Failed to get user data: ${userDataResult.error}`);
+      }
+      const { hero, dbData } = userDataResult.data;
+
+      const result = await this.getAliance(hash, accountIndex);
+      if (!result.success) return;
+      const alliances = result.data
+        .map((item) => {
+          // Tìm bonus dựa trên exp
+          const matchingLevel = dbData.dbAlliance.reverse().find((item2) => item.exp >= item2.exp);
+
+          // Nếu tìm thấy, thêm bonus vào đối tượng
+          return {
+            ...item,
+            bonus: matchingLevel ? matchingLevel.bonus : 0, // Nếu không tìm thấy, gán bonus là 0
+          };
+        })
+        .sort((a, b) => b.bonus - a.bonus);
+      const alliance = findOptimalElement(alliances, hero.coins);
+      if (!alliance) return this.log(`No alliance available to join!`, "warning");
+      await this.joinAliance(hash, accountIndex, alliance.id);
+    } catch (error) {}
+  }
+
+  async setQuiz(hash, accountIndex, questKey, result) {
+    const url = `${this.baseURL}/quiz/result/set`;
+    const currentTime = Math.floor(Date.now() / 1000);
+    const payload = {
+      data: {
+        key: questKey,
+        result: result,
+      },
+    };
+    const apiHash = await this.createApiHash(currentTime, JSON.stringify(payload));
+
+    const headers = {
+      ...this.headers,
+      "api-hash": `${apiHash}`,
+      "Api-Key": `${hash}`,
+      "Api-Time": `${currentTime}`,
+    };
+
+    try {
+      const response = await axios.post(url, payload, { headers, ...this.getAxiosConfig(accountIndex) });
+      if (response.status === 200 && response.data.success) {
+        return response.data;
+      }
+    } catch (error) {
+      this.log(`Error while checking quiz "${questKey}": ${error.message}`, "error");
+      return { success: false, error: error.message };
+    }
+  }
+
+  async claimQuiz(hash, accountIndex, questKey) {
+    const payload = { data: { key: questKey } };
+    const currentTime = Math.floor(Date.now() / 1000);
+    const apiHash = await this.createApiHash(currentTime, JSON.stringify(payload));
+    const url = `${this.baseURL}/quiz/claim`;
+    const headers = {
+      ...this.headers,
+      "api-hash": `${apiHash}`,
+      "Api-Key": `${hash}`,
+      "Api-Time": `${currentTime}`,
+    };
+
+    try {
+      const response = await axios.post(url, payload, {
+        headers,
+        ...this.getAxiosConfig(accountIndex),
+      });
+      if (response.status === 200 && response.data.success) {
+        return { success: true, data: response.data };
+      } else {
+        return { success: false, error: response.data.error };
+      }
+    } catch (error) {
+      this.log(`Error when claiming quiz "${questKey}": ${error.message}`, "error");
       return { success: false, error: error.message };
     }
   }
@@ -402,7 +544,7 @@ class ZooAPIClient {
         return { success: false, error: response.data.error };
       }
     } catch (error) {
-      this.log(`Error when claiming quest"${questKey}": ${error.message}`, "error");
+      this.log(`Error when claiming task"${questKey}": ${error.message}`, "error");
       return { success: false, error: error.message };
     }
   }
@@ -418,28 +560,60 @@ class ZooAPIClient {
         throw new Error(`Failed to get user data: ${userDataResult.error}`);
       }
       const { dbData } = userDataResult.data;
-      const quests = dbData.dbQuests.filter((q) => !settings.SKIP_TASKS.includes(q.key));
+      const quests = dbData.dbQuests.filter((q) => !settings.SKIP_TASKS.includes(q.key) && (q.actionTo == "" || !q.actionTo));
+
       for (const quest of quests) {
         if (quest.checkType === "donate_ton" || quest.checkType === "invite" || quest.checkType === "username" || quest.checkType === "ton_wallet_transaction") {
           continue;
         }
         if (quest.checkType === "checkCode") {
-          this.log(`Start answering daily questions...`, "custom");
           await this.AnswerDaily(hash, accountIndex, quest.key, quest.checkData);
-          continue; continue;
+          continue;
         }
         const claimResult = await this.claimQuest(hash, accountIndex, quest.key);
         if (claimResult.success === true) {
           this.log(`Complete quest ${quest.key} | "${quest.title}", receive ${quest.reward} reward.`, "success");
-        } else if (claimResult.error === "already rewarded") {
-          this.log(`Quest ${quest.key} "${quest.title}" has been completed previously.`, "warning");
-        } else {
-          this.log(`Cannot complete or need to do manually quest ${quest.key} | "${quest.title}": ${claimResult.error}`, "warning");
+} else if (claimResult.error === "already rewarded") {
+this.log(`Quest ${quest.key} "${quest.title}" has been completed before.`, "warning");
+} else {
+this.log(`Quest cannot be completed or needs to be done manually${quest.key} | "${quest.title}": ${claimResult.error}`, "warning");
         }
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
-    } catch (error) {
-      this.log(`Error getting task list: ${error.message}`, "error");
+
+      const quizs = dbData.dbQuizzes;
+      if (quizs.length <= 0) return;
+      let res = await this.setQuiz(hash, accountIndex, quizs[0].key, quizs[0].answers[0].key);
+      if (!res.success) return;
+      const { quizzes } = res.data;
+      const quizsAvaliable = quizs.filter((item1) => {
+        const found = quizzes.find((element) => element.key === item1.key);
+        // Nếu không tìm thấy trong array2 hoặc found.isReward là false thì giữ lại
+        return !found || !found.isRewarded;
+      });
+
+      for (const quiz of quizsAvaliable) {
+        this.log(`Start quiz ${quiz.title}...`, "info");
+        const result = quiz.answers[0].key;
+        res = await this.setQuiz(hash, accountIndex, quiz.key, result);
+        if (!res.success) continue;
+        // const { quizzes } = res.data;
+        // if(quizzes)
+        // const checkIsReward = quizzes.find((q) => q.key === quiz.key);
+        // if (checkIsReward && checkIsReward?.isRewarded) continue;
+
+        const claimResult = await this.claimQuiz(hash, accountIndex, quiz.key);
+        if (claimResult.success === true) {
+          this.log(`Complete quiz ${quiz.key} | "${quiz.title}", receive ${quiz.reward} reward.`, "success");
+} else if (claimResult.error === "already rewarded") {
+this.log(`quiz ${quiz.key} "${quiz.title}" has been completed before.`, "warning");
+} else {
+this.log(`Cannot complete or need to do it manually quiz ${quiz.key} | "${quiz.title}": ${claimResult.error}`, "warning");
+}
+await new Promise((resolve) => setTimeout(resolve, 1000));
+}
+} catch (error) {
+this.log(`Error while getting quiz list: ${error.message}`, "error");
     }
   }
 
@@ -497,7 +671,7 @@ class ZooAPIClient {
         });
 
         if (feedResponse.data.success) {
-          this.log("Feed the animals successfully", "success");
+          this.log("Feeding animals successfully", "success");
           return { success: true, data: feedResponse.data };
         }
       }
@@ -552,7 +726,7 @@ class ZooAPIClient {
               });
 
               if (response.status === 200 && response.data.success) {
-                this.log(`Buy successfully${dbAnimal.title}`, "success");
+                this.log(`Buy successfully ${dbAnimal.title}`, "success");
                 usedPositions.add(position);
                 existingKeys.add(dbAnimal.key);
               }
@@ -587,11 +761,11 @@ class ZooAPIClient {
                 });
 
                 if (response.status === 200 && response.data.success) {
-                  this.log(`Upgrade ${dbAnimal.title} successfully to level ${nextLevel}`, "success");
+                  this.log(`${dbAnimal.title} successfully upgraded to level ${nextLevel}`, "success");
                 }
               } catch (error) {
                 if (error.response?.status === 500) {
-                  this.log(`Failed to upgrade${dbAnimal.title}: ${error.message}`, "error");
+                  this.log(`Cannot upgrade ${dbAnimal.title}: ${error.message}`, "error");
                 }
               }
             }
@@ -645,7 +819,7 @@ class ZooAPIClient {
       const remainingSeconds = Math.floor(remainingTime.as("seconds")) % 60;
 
       readline.cursorTo(process.stdout, 0);
-      process.stdout.write(`[${currentTime}] [*] Wait ${remainingMinutes} minutes ${remainingSeconds} seconds to continue...`);
+      process.stdout.write(`[${currentTime}] [*]Wait ${remainingMinutes} minutes ${remainingSeconds} seconds to continue...`);
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
     readline.cursorTo(process.stdout, 0);
@@ -654,53 +828,54 @@ class ZooAPIClient {
 
   async runAccount() {
     const i = this.accountIndex;
-    const initData = this.queryId;
-    const queryData = JSON.parse(decodeURIComponent(initData.split("user=")[1].split("&")[0]));
-    const firstName = queryData.first_name || "";
-    const lastName = queryData.last_name || "";
-    this.session_name = queryData.id;
-
-    if (this.proxy) {
-      try {
-        this.proxyIP = await this.checkProxyIP(this.proxy);
-      } catch (proxyError) {
-        this.log(`Proxy check failed: ${proxyError.message}`, "warning");
-      }
-    }
-    const timesleep = getRandomNumber(settings.DELAY_START_BOT[0], settings.DELAY_START_BOT[1]);
-    console.log(`=========Account ${i + 1}| ${firstName + " " + lastName} | ${this.proxyIP} | Start later ${timesleep} second...`.green);
-    this.set_headers();
-    await sleep(timesleep);
-
     try {
-      this.log(`Signing in...`, "info");
-      const loginResult = await this.login(initData, i);
-      if (loginResult.success) {
-        this.log("Successful login!", "success");
+      const initData = this.queryId;
+      const queryData = JSON.parse(decodeURIComponent(initData.split("user=")[1].split("&")[0]));
+      const firstName = queryData.first_name || "";
+      const lastName = queryData.last_name || "";
+      this.session_name = queryData.id;
+
+      if (this.proxy) {
+        try {
+          this.proxyIP = await this.checkProxyIP(this.proxy);
+        } catch (proxyError) {
+          this.log(`Proxy check failed: ${proxyError.message}`, "warning");
+        }
+      }
+      const timesleep = getRandomNumber(settings.DELAY_START_BOT[0], settings.DELAY_START_BOT[1]);
+      console.log(`=========Account ${i + 1}| ${firstName + " " + lastName} | ${this.proxyIP} | Starts in ${timesleep} seconds...`.green);
+      this.set_headers();
+      await sleep(timesleep);
+
+      this.log(`Logging in...`, "info");
+const loginResult = await this.login(initData, i);
+if (loginResult.success) {
+this.log("Login successful!", "success");
+
         const userDataResult = await this.getUserData(initData, i);
         if (userDataResult.success) {
-          const { hero, feed } = userDataResult.data;
-
-          if (i === 0 && !feed.isNeedFeed && feed.nextFeedTime) {
-            const localFeedTime = DateTime.fromFormat(feed.nextFeedTime, "yyyy-MM-dd HH:mm:ss", { zone: "UTC" }).setZone("local");
-            this.log(`Next feeding time: ${localFeedTime.toFormat("yyyy-MM-dd HH:mm:ss")}`, "info");
-          }
+          const { hero, feed, alliance, profile } = userDataResult.data;
+          this.log(`User: ${(profile.firstName || "") + (profile.lastName || "")} | Coins: ${hero.tokens} | Food: ${hero.coins}`);
 
           if (Array.isArray(hero.onboarding) && hero.onboarding.length === 0) {
             this.log("Completing onboarding...", "info");
-            const onboardingResult = await this.finishOnboarding(initData, i);
-            if (onboardingResult.success) {
-              this.log("Onboarding completed successfully!", "success");
+const onboardingResult = await this.finishOnboarding(initData, i);
+if (onboardingResult.success) {
+this.log("Completed onboarding successfully!", "success");
             }
           }
 
-          if (settings.AUTO_FEED) {
-            await this.handleAutoFeed(initData, i);
+          if (!alliance?.id || alliance?.length == 0) {
+            await this.handleAliance(initData, i);
           }
 
-          if (settings.AUTO_TASK) {
-            await this.completeAllQuests(initData, i);
+          if (settings.AUTO_FEED) {
+            await sleep(1);
+            await this.handleAutoFeed(initData, i);
           }
+          await sleep(1);
+          await this.completeAllQuests(initData, i);
+          await sleep(1);
 
           if (settings.AUTO_BUY_ANIMAL || settings.AUTO_UPGRADE_ANIMAL) {
             await this.buyOrUpgradeAnimals(initData, i);
@@ -711,10 +886,10 @@ class ZooAPIClient {
             const { dailyRewards } = dataAfterResult.data;
             for (let day = 1; day <= 16; day++) {
               if (dailyRewards[day] === "canTake") {
-                this.log(`Receiving rewards on ${day}...`, "info");
-                const claimResult = await this.claimDailyReward(initData, day, i);
-                if (claimResult.success) {
-                  this.log("Daily attendance successful!", "success");
+                this.log(`Claiming daily reward ${day}...`, "info");
+const claimResult = await this.claimDailyReward(initData, day, i);
+if (claimResult.success) {
+this.log("Daily check-in successful!", "success");
                 }
                 break;
               }
@@ -723,10 +898,11 @@ class ZooAPIClient {
 
           const finalData = await this.getUserData(initData, i);
           if (finalData.success) {
-            this.log(`Token: ${finalData.data.hero.tokens}`, "custom");
-            this.log(`Coins: ${finalData.data.hero.coins}`, "custom");
+            this.log(`Coins: ${finalData.data.hero.tokens} | Food: ${finalData.data.hero.coins}`, "custom");
           }
         }
+      } else {
+        this.log(`Login failed: ${loginResult.error}`, "warning");
       }
 
       await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -759,16 +935,16 @@ async function main() {
   const proxies = loadData("proxy.txt");
 
   if (queryIds.length > proxies.length) {
-    console.log("The number of proxies and data must be equal.".red);
+    console.log("The number of proxies and data must be equal..".red);
     console.log(`Data: ${queryIds.length}`);
-    console.log(`Proxies: ${proxies.length}`);
+    console.log(`Proxy: ${proxies.length}`);
     process.exit(1);
   }
-  console.log("".yellow);
+  console.log("Script by (https://t.me/D4rkCipherX)".yellow);
   let maxThreads = settings.MAX_THEADS;
 
   const { endpoint: hasIDAPI, message } = await checkBaseUrl();
-  if (!hasIDAPI) return console.log(`Could not find API ID, try again later!`.red);
+  if (!hasIDAPI) return console.log(`API ID not found, try again later!`.red);
   console.log(`${message}`.yellow);
   // process.exit();
   queryIds.map((val, i) => new ZooAPIClient(val, i, proxies[i], hasIDAPI).createUserAgent());
@@ -803,14 +979,14 @@ async function main() {
               resolve();
             });
             worker.on("error", (error) => {
-              console.log(`Lỗi worker cho tài khoản ${currentIndex}: ${error.message}`);
-              worker.terminate();
-              resolve();
-            });
-            worker.on("exit", (code) => {
-              worker.terminate();
-              if (code !== 0) {
-                errors.push(`Worker cho tài khoản ${currentIndex} thoát với mã: ${code}`);
+              console.log(`Worker error for account ${currentIndex}: ${error.message}`);
+worker.terminate();
+resolve();
+});
+worker.on("exit", (code) => {
+worker.terminate();
+if (code !== 0) {
+errors.push(`Worker for account ${currentIndex} exited with code: ${code}`);
               }
               resolve();
             });
@@ -831,7 +1007,7 @@ async function main() {
       }
     }
     await sleep(3);
-    console.log("(https://t.me/S4rkCipherX)".yellow);
+    console.log("Join (https://t.me/D4rkCipherX)".yellow);
     console.log(`=============Complete all accounts | Wait ${settings.TIME_SLEEP} minutes=============`.magenta);
     await sleep(settings.TIME_SLEEP * 60);
   }
