@@ -7,7 +7,7 @@
 - Auto task
 - Auto upgrade
 - Auto Join Alliance
-- Auto Complete Quest
+- Auto Complete Quest/Quiz
 
 ## COOMANDS
 ```
