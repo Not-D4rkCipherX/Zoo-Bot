@@ -18,6 +18,27 @@ function _isArray(obj) {
   }
 }
 
+function findOptimalElement(array, coins) {
+  let optimalElement = null;
+
+  for (const item of array) {
+    // Kiểm tra điều kiện enterFee thấp hơn coins
+    if (item.enterFee < coins) {
+      // Nếu chưa có optimalElement, hoặc bonus cao hơn
+      if (!optimalElement || item.bonus > optimalElement.bonus) {
+        optimalElement = item;
+      } else if (item.bonus === optimalElement.bonus) {
+        // Nếu bonus bằng nhau, kiểm tra enterFee gần hơn với coins
+        if (coins - item.enterFee < coins - optimalElement.enterFee) {
+          optimalElement = item;
+        }
+      }
+    }
+  }
+
+  return optimalElement;
+}
+
 function splitIdPet(num) {
   const numStr = num.toString();
   const firstPart = numStr.slice(0, 3); // Lấy 3 ký tự đầu tiên
@@ -32,7 +53,7 @@ async function updateEnv(variable, value) {
   // Đọc file .env
   fs.readFile(envFilePath, "utf8", (err, data) => {
     if (err) {
-      console.log("Unable to read .env file:", err);
+      console.log("Không thể đọc file .env:", err);
       return;
     }
     // console.log(value, variable);
@@ -48,7 +69,7 @@ async function updateEnv(variable, value) {
     // Ghi lại file .env
     fs.writeFile(envFilePath, newData, "utf8", (err) => {
       if (err) {
-        console.error("Unable to write .env file:", err);
+        console.error("Không thể ghi file .env:", err);
       } else {
         // console.log(`Đã cập nhật ${variable} thành ${value}`);
       }
@@ -136,12 +157,12 @@ function loadData(file) {
   try {
     const datas = fs.readFileSync(file, "utf8").replace(/\r/g, "").split("\n").filter(Boolean);
     if (datas?.length <= 0) {
-      console.log(colors.red(`Data not found ${file}`));
+      console.log(colors.red(`Không tìm thấy dữ liệu ${file}`));
       return [];
     }
     return datas;
   } catch (error) {
-    console.log(`File not found ${file}`.red);
+    console.log(`Không tìm thấy file ${file}`.red);
     return [];
   }
 }
@@ -205,4 +226,5 @@ module.exports = {
   log,
   getOrCreateJSON,
   sleep,
+  findOptimalElement,
 };
