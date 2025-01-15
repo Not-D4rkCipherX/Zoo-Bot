@@ -8,7 +8,7 @@ const { DateTime } = require("luxon");
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const user_agents = require("./config/userAgents");
 const settings = require("./config/config");
-const { sleep, loadData } = require("./utils");
+const { sleep, loadData, findOptimalElement } = require("./utils");
 const { checkBaseUrl } = require("./checkAPI");
 
 class ZooAPIClient {
@@ -60,7 +60,7 @@ class ZooAPIClient {
       return this.session_user_agents[this.session_name];
     }
 
-    this.log(`Tạo user agent...`);
+    this.log(`Generating user agents...`);
     const newUserAgent = this.#get_random_user_agent();
     this.session_user_agents[this.session_name] = newUserAgent;
     this.#save_session_data(this.session_user_agents);
@@ -116,10 +116,10 @@ class ZooAPIClient {
       if (response.status === 200) {
         return response.data.ip;
       } else {
-        throw new Error('Unable to check the IP of the proxy. Status code: ${response.status}');
+        throw new Error(`Unable to check proxy IP. Status code: ${response.status}`);
       }
     } catch (error) {
-      throw new Error(`Error when checking the IP of the proxy: ${error.message}`);
+      throw new Error(`Error when checking proxy IP: ${error.message}`);
     }
   }
 
@@ -353,11 +353,152 @@ class ZooAPIClient {
       if (response.status === 200 && response.data.success) {
         return await this.claimQuest(hash, accountIndex, questKey, checkData);
       } else {
-        this.log(`Task "${questKey}" test failed: ${response.data.error}`, "warning");
+        this.log(`Task test "${questKey}" failed: ${response.data.error}`, "warning");
         return { success: false, error: response.data.error };
       }
     } catch (error) {
-      this.log(`Errors when checking tasks "${questKey}": ${error.message}`, "error");
+      this.log(`Error checking task "${questKey}": ${error.message}`, "error");
+      return { success: false, error: error.message };
+    }
+  }
+
+  async getAliance(hash, accountIndex) {
+    const url = `${this.baseURL}/alliance/rating`;
+    const currentTime = Math.floor(Date.now() / 1000);
+    const payload = {};
+    const apiHash = await this.createApiHash(currentTime, JSON.stringify(payload));
+
+    const headers = {
+      ...this.headers,
+      "api-hash": `${apiHash}`,
+      "Api-Key": `${hash}`,
+      "Api-Time": `${currentTime}`,
+    };
+
+    try {
+      const response = await axios.post(url, payload, { headers, ...this.getAxiosConfig(accountIndex) });
+      if (response.status === 200 && response.data.success) {
+        return response.data;
+      }
+    } catch (error) {
+      this.log(`Error when getting Aliancee: ${error.message}`, "error");
+      return { success: false, error: error.message };
+    }
+  }
+
+  async joinAliance(hash, accountIndex, id) {
+    const url = `${this.baseURL}/alliance/join`;
+    const currentTime = Math.floor(Date.now() / 1000);
+    const payload = { data: id };
+    const apiHash = await this.createApiHash(currentTime, JSON.stringify(payload));
+
+    const headers = {
+      ...this.headers,
+      "api-hash": `${apiHash}`,
+      "Api-Key": `${hash}`,
+      "Api-Time": `${currentTime}`,
+    };
+
+    try {
+      const response = await axios.post(url, payload, { headers, ...this.getAxiosConfig(accountIndex) });
+      if (response.status === 200 && response.data.success) {
+        // const { alliance } = response.data;
+        this.log(`Join aliance success!`, "success");
+        return response.data;
+      }
+    } catch (error) {
+      this.log(`Lỗi khi join Aliance: ${error.message}`, "error");
+      return { success: false, error: error.message };
+    }
+  }
+
+  async handleAliance(initData, accountIndex) {
+    this.log(`Checking aliance avaliable...`);
+    try {
+      const hash = initData.split("hash=")[1]?.split("&")[0];
+      if (!hash) {
+        return;
+      }
+
+      const userDataResult = await this.getUserData(initData, accountIndex);
+      if (!userDataResult.success) {
+        throw new Error(`Failed to get user data: ${userDataResult.error}`);
+      }
+      const { hero, dbData } = userDataResult.data;
+
+      const result = await this.getAliance(hash, accountIndex);
+      if (!result.success) return;
+      const alliances = result.data
+        .map((item) => {
+          // Tìm bonus dựa trên exp
+          const matchingLevel = dbData.dbAlliance.reverse().find((item2) => item.exp >= item2.exp);
+
+          // Nếu tìm thấy, thêm bonus vào đối tượng
+          return {
+            ...item,
+            bonus: matchingLevel ? matchingLevel.bonus : 0, // Nếu không tìm thấy, gán bonus là 0
+          };
+        })
+        .sort((a, b) => b.bonus - a.bonus);
+      const alliance = findOptimalElement(alliances, hero.coins);
+      if (!alliance) return this.log(`No alliance available to join!`, "warning");
+      await this.joinAliance(hash, accountIndex, alliance.id);
+    } catch (error) {}
+  }
+
+  async setQuiz(hash, accountIndex, questKey, result) {
+    const url = `${this.baseURL}/quiz/result/set`;
+    const currentTime = Math.floor(Date.now() / 1000);
+    const payload = {
+      data: {
+        key: questKey,
+        result: result,
+      },
+    };
+    const apiHash = await this.createApiHash(currentTime, JSON.stringify(payload));
+
+    const headers = {
+      ...this.headers,
+      "api-hash": `${apiHash}`,
+      "Api-Key": `${hash}`,
+      "Api-Time": `${currentTime}`,
+    };
+
+    try {
+      const response = await axios.post(url, payload, { headers, ...this.getAxiosConfig(accountIndex) });
+      if (response.status === 200 && response.data.success) {
+        return response.data;
+      }
+    } catch (error) {
+      this.log(`Error when checking quiz "${questKey}": ${error.message}`, "error");
+      return { success: false, error: error.message };
+    }
+  }
+
+  async claimQuiz(hash, accountIndex, questKey) {
+    const payload = { data: { key: questKey } };
+    const currentTime = Math.floor(Date.now() / 1000);
+    const apiHash = await this.createApiHash(currentTime, JSON.stringify(payload));
+    const url = `${this.baseURL}/quiz/claim`;
+    const headers = {
+      ...this.headers,
+      "api-hash": `${apiHash}`,
+      "Api-Key": `${hash}`,
+      "Api-Time": `${currentTime}`,
+    };
+
+    try {
+      const response = await axios.post(url, payload, {
+        headers,
+        ...this.getAxiosConfig(accountIndex),
+      });
+      if (response.status === 200 && response.data.success) {
+        return { success: true, data: response.data };
+      } else {
+        return { success: false, error: response.data.error };
+      }
+    } catch (error) {
+      this.log(`Error when claiming quiz"${questKey}": ${error.message}`, "error");
       return { success: false, error: error.message };
     }
   }
@@ -380,13 +521,13 @@ class ZooAPIClient {
         ...this.getAxiosConfig(accountIndex),
       });
       if (response.status === 200 && response.data.success) {
-        this.log(`Claim the "${questKey}" quest successfully, get the reward.`, "success");
+        this.log(`Claim the mission "${questKey}" successfully and receive a reward.`, "success");
         return { success: true, data: response.data };
       } else {
         return { success: false, error: response.data.error };
       }
     } catch (error) {
-      this.log(`Error when claiming a task "${questKey}": ${error.message}`, "error");
+      this.log(`Error when claiming quest "${questKey}": ${error.message}`, "error");
       return { success: false, error: error.message };
     }
   }
@@ -402,28 +543,60 @@ class ZooAPIClient {
         throw new Error(`Failed to get user data: ${userDataResult.error}`);
       }
       const { dbData } = userDataResult.data;
-      const quests = dbData.dbQuests.filter((q) => !settings.SKIP_TASKS.includes(q.key));
+      const quests = dbData.dbQuests.filter((q) => !settings.SKIP_TASKS.includes(q.key) && (q.actionTo == "" || !q.actionTo));
+
       for (const quest of quests) {
         if (quest.checkType === "donate_ton" || quest.checkType === "invite" || quest.checkType === "username" || quest.checkType === "ton_wallet_transaction") {
           continue;
         }
         if (quest.checkType === "checkCode") {
-          this.log(`Start the task of answering daily questions...`, "custom");
           await this.AnswerDaily(hash, accountIndex, quest.key, quest.checkData);
           continue;
         }
         const claimResult = await this.claimQuest(hash, accountIndex, quest.key);
         if (claimResult.success === true) {
-          this.log(`Complete Quests ${quest.key} | "${quest.title}", get ${quest.reward} reward.', "success");
+          this.log(`Complete quest ${quest.key} | "${quest.title}", get ${quest.reward} reward.`, "success");
         } else if (claimResult.error === "already rewarded") {
-          this.log('Mission ${quest.key} "${quest.title}" was previously completed.', "warning");
+          this.log(`Quest ${quest.key} "${quest.title}" was previously completed.`, "warning");
         } else {
-          this.log('Unable to complete or need to do the task manually' ${quest.key} | "${quest.title}": ${claimResult.error}`, "warning");
+          this.log(`The task could not be completed or needs to be done manually${quest.key} | "${quest.title}": ${claimResult.error}`, "warning");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+
+      const quizs = dbData.dbQuizzes;
+      if (quizs.length <= 0) return;
+      let res = await this.setQuiz(hash, accountIndex, quizs[0].key, quizs[0].answers[0].key);
+      if (!res.success) return;
+      const { quizzes } = res.data;
+      const quizsAvaliable = quizs.filter((item1) => {
+        const found = quizzes.find((element) => element.key === item1.key);
+        // Nếu không tìm thấy trong array2 hoặc found.isReward là false thì giữ lại
+        return !found || !found.isRewarded;
+      });
+
+      for (const quiz of quizsAvaliable) {
+        this.log(`Start quiz ${quiz.title}...`, "info");
+        const result = quiz.answers[0].key;
+        res = await this.setQuiz(hash, accountIndex, quiz.key, result);
+        if (!res.success) continue;
+        // const { quizzes } = res.data;
+        // if(quizzes)
+        // const checkIsReward = quizzes.find((q) => q.key === quiz.key);
+        // if (checkIsReward && checkIsReward?.isRewarded) continue;
+
+        const claimResult = await this.claimQuiz(hash, accountIndex, quiz.key);
+        if (claimResult.success === true) {
+          this.log(`Complete quiz ${quiz.key} | "${quiz.title}", get ${quiz.reward} reward.`, "success");
+        } else if (claimResult.error === "already rewarded") {
+          this.log(`quiz ${quiz.key} "${quiz.title}" was completed previously.`, "warning");
+        } else {
+          this.log(`Cannot complete or need to do it manually quiz ${quiz.key} | "${quiz.title}": ${claimResult.error}`, "warning");
         }
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     } catch (error) {
-      this.log(`Error fetching task list: ${error.message}`, "error");
+      this.log(`Error getting quiz list: ${error.message}`, "error");
     }
   }
 
@@ -481,7 +654,7 @@ class ZooAPIClient {
         });
 
         if (feedResponse.data.success) {
-          this.log("Feeding animals successfully", "success");
+          this.log("Feed the animals successfully", "success");
           return { success: true, data: feedResponse.data };
         }
       }
@@ -536,7 +709,7 @@ class ZooAPIClient {
               });
 
               if (response.status === 200 && response.data.success) {
-                this.log(`Successful purchase ${dbAnimal.title}`, "success");
+                this.log(`Mua thành công ${dbAnimal.title}`, "success");
                 usedPositions.add(position);
                 existingKeys.add(dbAnimal.key);
               }
@@ -634,7 +807,7 @@ class ZooAPIClient {
   }
 
   async main() {
-    this.log(`(https://t.me/D4rkCipherX)`, "warning");
+    this.log(`Script By (https://www.youtube.com/@D4rkCipherX)`, "warning");
     try {
       const { endpoint: hasIDAPI, message } = await checkBaseUrl();
       if (!hasIDAPI) return console.log(`Could not find API ID, try again later!`.red);
@@ -672,8 +845,8 @@ class ZooAPIClient {
 
               const userDataResult = await this.getUserData(initData, i);
               if (userDataResult.success) {
-                const { hero, feed } = userDataResult.data;
-
+                const { hero, feed, alliance, profile } = userDataResult.data;
+                this.log(`User: ${(profile.firstName || "") + (profile.lastName || "")} | Coins: ${hero.tokens} | Food: ${hero.coins}`);
                 if (i === 0 && !feed.isNeedFeed && feed.nextFeedTime) {
                   firstAccountFeedTime = feed.nextFeedTime;
                   const localFeedTime = DateTime.fromFormat(feed.nextFeedTime, "yyyy-MM-dd HH:mm:ss", { zone: "UTC" }).setZone("local");
@@ -685,8 +858,12 @@ class ZooAPIClient {
                   this.log("Completing onboarding...", "info");
                   const onboardingResult = await this.finishOnboarding(initData, i);
                   if (onboardingResult.success) {
-                    this.log("Onboarding completed successfully!", "success");
+                    this.log("Completed onboarding successfully!", "success");
                   }
+                }
+
+                if (!alliance?.id || alliance?.length == 0) {
+                  await this.handleAliance(initData, i);
                 }
 
                 if (settings.AUTO_FEED) {
@@ -706,7 +883,7 @@ class ZooAPIClient {
                   const { dailyRewards } = dataAfterResult.data;
                   for (let day = 1; day <= 16; day++) {
                     if (dailyRewards[day] === "canTake") {
-                      this.log(`Receiving rewards ${day}...`, "info");
+                      this.log(`Receiving reward on ${day}...`, "info");
                       const claimResult = await this.claimDailyReward(initData, day, i);
                       if (claimResult.success) {
                         this.log("Daily attendance successful!", "success");
@@ -718,10 +895,11 @@ class ZooAPIClient {
 
                 const finalData = await this.getUserData(initData, i);
                 if (finalData.success) {
-                  this.log(`Token: ${finalData.data.hero.tokens}`, "custom");
-                  this.log(`Coins: ${finalData.data.hero.coins}`, "custom");
+                  this.log(`Coins: ${finalData.data.hero.tokens} | Food: ${finalData.data.hero.coins}`, "custom");
                 }
               }
+            } else {
+              this.log(`Login failed: ${loginResult.error}`, "warning");
             }
 
             await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -731,13 +909,15 @@ class ZooAPIClient {
           }
         }
 
+        this.log(`Complete all accounts.`, "custom");
+
         if (firstAccountFeedTime) {
           nextCycleWaitTime = this.calculateWaitTimeInSeconds(firstAccountFeedTime);
           const waitMinutes = Math.floor(nextCycleWaitTime / 60);
           const waitSeconds = nextCycleWaitTime % 60;
-          this.log(`Wait${waitMinutes} minute ${waitSeconds} seconds until next feeding`, "info");
+          this.log(`Wait ${waitMinutes} minutes ${waitSeconds} seconds until next feeding`, "info");
         } else {
-          this.log(`Use default timeout 24 hours`, "info");
+          this.log(`Using default timeout ${settings.TIME_SLEEP} minutes`, "info");
         }
 
         await sleep(nextCycleWaitTime);
